@@ -14,6 +14,7 @@ impl Default for ChapterStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct Chapter {
     pub number: usize,
     pub title: String,
@@ -48,6 +49,7 @@ impl Chapter {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NovelProject {
     pub title: String,
     pub author: String,

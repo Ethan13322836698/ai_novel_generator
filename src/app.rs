@@ -402,14 +402,34 @@ impl NovelApp {
     }
     fn do_open(&mut self) {
         if let Some(path) = rfd::FileDialog::new().add_filter("小说项目",&["json"]).pick_file() {
-            match std::fs::read_to_string(&path).ok().and_then(|d| serde_json::from_str::<NovelProject>(&d).ok()) {
-                Some(proj) => {
-                    self.title_buf=proj.title.clone(); self.count_buf=proj.target_chapters.to_string();
-                    self.words_buf=proj.target_words_per_chapter.to_string();
-                    self.project=proj; self.current_file=Some(path); self.gen_state=GenState::Idle;
-                    self.toast("项目已加载 ✓",ToastKind::Ok);
+            let data = match std::fs::read_to_string(&path) {
+                Ok(d) => d,
+                Err(e) => { self.toast(format!("读取失败：{}", e), ToastKind::Err); return; }
+            };
+            match serde_json::from_str::<NovelProject>(&data) {
+                Ok(mut proj) => {
+                    // 把残留的 Generating 状态重置为 Pending（worker 此时未运行）
+                    for ch in &mut proj.chapters {
+                        if matches!(ch.status, ChapterStatus::Generating) {
+                            ch.status = if ch.content.is_empty() {
+                                ChapterStatus::Pending
+                            } else {
+                                ChapterStatus::Done
+                            };
+                        }
+                        ch.update_word_count();
+                    }
+                    let n_ch = proj.chapters.len();
+                    self.title_buf = proj.title.clone();
+                    self.count_buf = proj.target_chapters.to_string();
+                    self.words_buf = proj.target_words_per_chapter.to_string();
+                    self.project = proj;
+                    self.current_file = Some(path);
+                    self.gen_state = GenState::Idle;
+                    self.selected_chapter = if n_ch > 0 { Some(0) } else { None };
+                    self.toast(format!("已加载 ✓  ({} 章)", n_ch), ToastKind::Ok);
                 }
-                None => self.toast("文件格式错误",ToastKind::Err),
+                Err(e) => self.toast(format!("解析失败：{}", e), ToastKind::Err),
             }
         }
     }

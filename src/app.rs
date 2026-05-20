@@ -372,8 +372,26 @@ impl NovelApp {
         let outline = if self.project.optimized_outline.is_empty() { self.project.outline.clone() }
                       else { self.project.optimized_outline.clone() };
         if outline.trim().is_empty() { self.toast("请先填写故事大纲", ToastKind::Err); return; }
-        self.worker.reset_stop(); self.gen_state = GenState::GeneratingPlan;
-        self.project.chapters.clear(); self.selected_chapter = None;
+
+        // 已有章节：从第一个未完成章节续写，不清空
+        if !self.project.chapters.is_empty() {
+            let next = self.project.chapters.iter()
+                .position(|c| !matches!(c.status, ChapterStatus::Done));
+            match next {
+                Some(idx) => {
+                    self.worker.reset_stop();
+                    self.toast(format!("从第 {} 章续写…", idx + 1), ToastKind::Info);
+                    self.launch(idx);
+                }
+                None => self.toast("全部章节已生成完成", ToastKind::Info),
+            }
+            return;
+        }
+
+        // 全新生成：规划 + 逐章
+        self.worker.reset_stop();
+        self.gen_state = GenState::GeneratingPlan;
+        self.selected_chapter = None;
         self.worker.send(WorkerCmd::GeneratePlan {
             title: self.project.title.clone(),
             outline: truncate_chars(&outline, 1500),
@@ -676,7 +694,16 @@ impl NovelApp {
                         ui.label(RichText::new(self.gen_state.label(self.project.chapters.len())).size(13.0).color(th.primary()));
                         ui.add_space(8.0);
                     } else {
-                        if btn_filled(ui,"▶  开始生成",!paused,th).clicked() { self.begin_gen(); }
+                        let has_pending = self.project.chapters.iter()
+                            .any(|c| !matches!(c.status, ChapterStatus::Done));
+                        let gen_label = if self.project.chapters.is_empty() {
+                            "▶  开始生成"
+                        } else if has_pending {
+                            "▶  续写"
+                        } else {
+                            "✓  已完成"
+                        };
+                        if btn_filled(ui, gen_label, !paused && (self.project.chapters.is_empty() || has_pending), th).clicked() { self.begin_gen(); }
                         ui.add_space(6.0);
                     }
                     let (pl,pe) = if paused {("▶ 继续",true)} else {("⏸ 暂停",running)};

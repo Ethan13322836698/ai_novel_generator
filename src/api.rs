@@ -27,6 +27,8 @@ pub enum WorkerCmd {
         words: usize,
         /// 已选境界体系的格式化说明（空字符串=不使用）
         realm_info: String,
+        reduce_ai_traits: bool,
+        avoid_famous_names: bool,
     },
     Stop,
 }
@@ -141,6 +143,7 @@ fn run_worker(
             WorkerCmd::GenerateChapter {
                 num, chapter_title, brief, novel_title, outline,
                 context, template_name, words, realm_info,
+                reduce_ai_traits, avoid_famous_names,
             } => {
                 let cfg = config.lock().unwrap().clone();
                 let tmpl = crate::templates::get_template_by_name(&template_name);
@@ -155,7 +158,7 @@ fn run_worker(
                 } else {
                     format!("{}{}", outline, realm_info)
                 };
-                let prompt = prompt_template_str
+                let mut prompt = prompt_template_str
                     .replace("{title}", &novel_title)
                     .replace("{num}", &num.to_string())
                     .replace("{chapter_title}", &chapter_title)
@@ -163,6 +166,12 @@ fn run_worker(
                     .replace("{context}", &context)
                     .replace("{outline}", &full_outline)
                     .replace("{words}", &words.to_string());
+                if reduce_ai_traits {
+                    prompt.push_str("\n\n额外要求：避免明显的 AI 写作特征——少用排比铺陈、固定句式开头、过度比喻；多用具体细节代替形容词；对话符合人物身份不要书面化。");
+                }
+                if avoid_famous_names {
+                    prompt.push_str("\n\n禁用以下主角名（防止与知名小说雷同）：陈平安、韩立、王林、楚天南、萧炎、唐三、洛天、罗峰、林动、叶凡、石昊、孟浩、王腾、李慕白、徐凤年、宁缺、傅红雪。请使用原创姓名。");
+                }
                 let messages = vec![
                     msg("system", system),
                     msg("user", &prompt),

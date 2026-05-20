@@ -80,7 +80,7 @@ pub fn provider_presets() -> Vec<ProviderPreset> {
         ProviderPreset {
             name: "Gemini",
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
-            models: &["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
+            models: &["gemini-flash-lite-latest", "gemini-flash-latest", "gemini-pro-latest"],
         },
         ProviderPreset {
             name: "Ollama",

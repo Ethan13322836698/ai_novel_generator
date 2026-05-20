@@ -48,6 +48,15 @@ impl Chapter {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CustomRealm {
+    pub order: u32,
+    pub name: String,
+    pub description: String,
+    pub sub_levels: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NovelProject {
@@ -63,6 +72,9 @@ pub struct NovelProject {
     pub selected_realms: Vec<String>,
     /// 用户自定义境界文本（追加到 selected_realms 之后）
     pub custom_realm: String,
+    pub reduce_ai_traits: bool,
+    pub avoid_famous_names: bool,
+    pub custom_realms: Vec<CustomRealm>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -80,6 +92,9 @@ impl Default for NovelProject {
             target_words_per_chapter: 3000,
             selected_realms: Vec::new(),
             custom_realm: String::new(),
+            reduce_ai_traits: false,
+            avoid_famous_names: false,
+            custom_realms: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

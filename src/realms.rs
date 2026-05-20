@@ -1,3 +1,20 @@
+use crate::novel::CustomRealm;
+
+pub fn build_custom_realms_prompt(realms: &[CustomRealm]) -> String {
+    if realms.is_empty() { return String::new(); }
+    let mut list: Vec<&CustomRealm> = realms.iter().collect();
+    list.sort_by_key(|r| r.order);
+    let mut out = String::from("\n\n【自定义境界体系】\n");
+    for (i, r) in list.iter().enumerate() {
+        let desc = if r.description.is_empty() { String::new() } else { format!("（{}）", r.description) };
+        out.push_str(&format!("{}. {}{}\n", i + 1, r.name, desc));
+        if !r.sub_levels.is_empty() {
+            out.push_str(&format!("   小境界：{}\n", r.sub_levels));
+        }
+    }
+    out
+}
+
 /// 境界/力量体系定义
 #[derive(Debug, Clone)]
 pub struct RealmSystem {

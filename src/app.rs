@@ -373,14 +373,23 @@ impl NovelApp {
                       else { self.project.optimized_outline.clone() };
         if outline.trim().is_empty() { self.toast("请先填写故事大纲", ToastKind::Err); return; }
 
-        // 已有章节：从第一个未完成章节续写，不清空
+        // 已有章节：找第一个「未完成或写了一半」的章节续写
         if !self.project.chapters.is_empty() {
-            let next = self.project.chapters.iter()
-                .position(|c| !matches!(c.status, ChapterStatus::Done));
+            // 半成品阈值：字数低于目标的 60% 视为未写完，需重新生成
+            let threshold = (self.project.target_words_per_chapter as f32 * 0.6) as usize;
+            let next = self.project.chapters.iter().position(|c| {
+                !matches!(c.status, ChapterStatus::Done) || c.word_count < threshold
+            });
             match next {
                 Some(idx) => {
                     self.worker.reset_stop();
-                    self.toast(format!("从第 {} 章续写…", idx + 1), ToastKind::Info);
+                    let ch = &self.project.chapters[idx];
+                    let msg = if matches!(ch.status, ChapterStatus::Done) && ch.word_count < threshold {
+                        format!("第 {} 章字数偏少，重新生成…", idx + 1)
+                    } else {
+                        format!("从第 {} 章续写…", idx + 1)
+                    };
+                    self.toast(msg, ToastKind::Info);
                     self.launch(idx);
                 }
                 None => self.toast("全部章节已生成完成", ToastKind::Info),
@@ -426,14 +435,11 @@ impl NovelApp {
             };
             match serde_json::from_str::<NovelProject>(&data) {
                 Ok(mut proj) => {
-                    // 把残留的 Generating 状态重置为 Pending（worker 此时未运行）
+                    // 写到一半被中断的章节：清空残稿，标 Pending 让续写时重新生成
                     for ch in &mut proj.chapters {
                         if matches!(ch.status, ChapterStatus::Generating) {
-                            ch.status = if ch.content.is_empty() {
-                                ChapterStatus::Pending
-                            } else {
-                                ChapterStatus::Done
-                            };
+                            ch.content.clear();
+                            ch.status = ChapterStatus::Pending;
                         }
                         ch.update_word_count();
                     }
@@ -694,8 +700,9 @@ impl NovelApp {
                         ui.label(RichText::new(self.gen_state.label(self.project.chapters.len())).size(13.0).color(th.primary()));
                         ui.add_space(8.0);
                     } else {
+                        let threshold = (self.project.target_words_per_chapter as f32 * 0.6) as usize;
                         let has_pending = self.project.chapters.iter()
-                            .any(|c| !matches!(c.status, ChapterStatus::Done));
+                            .any(|c| !matches!(c.status, ChapterStatus::Done) || c.word_count < threshold);
                         let gen_label = if self.project.chapters.is_empty() {
                             "▶  开始生成"
                         } else if has_pending {

@@ -696,7 +696,6 @@ impl eframe::App for NovelApp {
         }
 
         self.draw_top_bar(ctx, th);
-        if !self.show_wizard { self.draw_nav_drawer(ctx, th); }
         self.draw_center(ctx, th, font_sz);
         self.draw_toasts(ctx, th);
         if self.show_settings { self.draw_settings(ctx, th); }
@@ -1522,60 +1521,78 @@ impl NovelApp {
         let mut prev = false;
         let mut finish = false;
 
-        // 居中容器，最大宽度 720
+        // 居中：用左右留白 + 居中布局，确保内容获得正确宽度
         let avail_w = ui.available_width();
         let max_w = avail_w.min(720.0);
-        let pad_x = (avail_w - max_w) / 2.0;
+        let pad_x = ((avail_w - max_w) / 2.0).max(0.0);
+
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            // 顶部留点空间
+            ui.add_space(4.0);
+        });
+
+        // 居中容器：在外层 horizontal 中给定明确宽度的子区域
+        let total_h = ui.available_height();
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(avail_w, total_h), egui::Sense::hover());
+        let inner_rect = Rect::from_min_size(
+            pos2(rect.min.x + pad_x, rect.min.y),
+            Vec2::new(max_w, total_h),
+        );
+        let mut content_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        let ui = &mut content_ui;
+
+        // Header
         ui.horizontal(|ui| {
-            ui.add_space(pad_x);
-            ui.allocate_ui(Vec2::new(max_w, ui.available_height()), |ui| {
-                // Header
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("✨  新建小说").size(22.0).color(th.on_surface()).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if btn_text(ui, "✕ 取消", th.on_surface_variant()).clicked() { cancel = true; }
-                    });
-                });
-                ui.add_space(10.0);
-                // Progress
-                ui.horizontal(|ui| {
-                    let titles = ["类型模板","章节字数","修炼体系","标题大纲"];
-                    for (i, t) in titles.iter().enumerate() {
-                        let active = i as u8 == page;
-                        let done = (i as u8) < page;
-                        let col = if active { th.primary() } else if done { th.on_tertiary_container() } else { th.on_surface_variant() };
-                        let sym = if done { "✓" } else { "○" };
-                        ui.label(RichText::new(format!("{}  {}.{}", sym, i+1, t)).size(12.5).color(col).strong());
-                        if i < titles.len()-1 { ui.add_space(4.0); ui.label(RichText::new("›").size(12.0).color(th.on_surface_variant())); ui.add_space(4.0); }
-                    }
-                });
-                ui.add_space(8.0);
-                ui.add(egui::Separator::default().spacing(6.0));
-                ui.add_space(12.0);
+            ui.label(RichText::new("✨  新建小说").size(22.0).color(th.on_surface()).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if btn_text(ui, "✕ 取消", th.on_surface_variant()).clicked() { cancel = true; }
+            });
+        });
+        ui.add_space(10.0);
 
-                let avail_h = ui.available_height() - 70.0;
-                egui::ScrollArea::vertical().id_salt("wizard_scroll").max_height(avail_h.max(200.0)).auto_shrink([false;2]).show(ui, |ui| {
-                    match page {
-                        0 => self.wizard_page_template(ui, th),
-                        1 => self.wizard_page_counts(ui, th),
-                        2 => self.wizard_page_realms(ui, th),
-                        _ => self.wizard_page_outline(ui, th),
-                    }
-                });
+        // Progress
+        ui.horizontal(|ui| {
+            let titles = ["类型模板","章节字数","修炼体系","标题大纲"];
+            for (i, t) in titles.iter().enumerate() {
+                let active = i as u8 == page;
+                let done = (i as u8) < page;
+                let col = if active { th.primary() } else if done { th.on_tertiary_container() } else { th.on_surface_variant() };
+                let sym = if done { "✓" } else { "○" };
+                ui.label(RichText::new(format!("{}  {}.{}", sym, i+1, t)).size(12.5).color(col).strong());
+                if i < titles.len()-1 { ui.add_space(4.0); ui.label(RichText::new("›").size(12.0).color(th.on_surface_variant())); ui.add_space(4.0); }
+            }
+        });
+        ui.add_space(8.0);
+        ui.add(egui::Separator::default().spacing(6.0));
+        ui.add_space(12.0);
 
-                ui.add_space(12.0);
-                ui.add(egui::Separator::default().spacing(4.0));
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if page > 0 { if btn_outlined(ui,"← 上一步",true,th).clicked() { prev = true; } }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if page < 3 {
-                            if btn_filled(ui,"下一步 →",true,th).clicked() { next = true; }
-                        } else {
-                            if btn_filled(ui,"✓  完成",true,th).clicked() { finish = true; }
-                        }
-                    });
-                });
+        let avail_h = ui.available_height() - 70.0;
+        egui::ScrollArea::vertical().id_salt("wizard_scroll").max_height(avail_h.max(200.0)).auto_shrink([false;2]).show(ui, |ui| {
+            ui.set_min_width(max_w - 8.0);
+            match page {
+                0 => self.wizard_page_template(ui, th),
+                1 => self.wizard_page_counts(ui, th),
+                2 => self.wizard_page_realms(ui, th),
+                _ => self.wizard_page_outline(ui, th),
+            }
+        });
+
+        ui.add_space(12.0);
+        ui.add(egui::Separator::default().spacing(4.0));
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if page > 0 { if btn_outlined(ui,"← 上一步",true,th).clicked() { prev = true; } }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if page < 3 {
+                    if btn_filled(ui,"下一步 →",true,th).clicked() { next = true; }
+                } else {
+                    if btn_filled(ui,"✓  完成",true,th).clicked() { finish = true; }
+                }
             });
         });
 

@@ -57,6 +57,13 @@ pub struct CustomRealm {
     pub sub_levels: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CustomTemplate {
+    pub name: String,
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NovelProject {
@@ -77,8 +84,10 @@ pub struct NovelProject {
     pub reduce_ai_traits: bool,
     pub avoid_famous_names: bool,
     pub custom_realms: Vec<CustomRealm>,
-    /// 自定义模板的简介/创作要求（template 不是内置模板时使用）
+    /// 自定义模板的简介/创作要求（template 不是内置模板时使用，遗留字段）
     pub custom_template_desc: String,
+    /// 用户自定义模板列表（可多选）
+    pub custom_templates: Vec<CustomTemplate>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -101,6 +110,7 @@ impl Default for NovelProject {
             avoid_famous_names: false,
             custom_realms: Vec::new(),
             custom_template_desc: String::new(),
+            custom_templates: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

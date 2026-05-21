@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use egui::{Color32, FontId, Rounding, RichText, Stroke, Vec2, Margin, Rect, pos2, Shape};
 use crate::api::{ApiWorker, WorkerCmd, WorkerMsg};
 use crate::config::{provider_presets, AppConfig};
-use crate::novel::{Chapter, ChapterStatus, CustomRealm, NovelProject};
+use crate::novel::{Chapter, ChapterStatus, CustomRealm, CustomTemplate, NovelProject};
 use crate::realms::{all_realms, build_custom_realms_prompt, build_realm_prompt};
 use crate::templates::all_templates;
 
@@ -225,6 +225,8 @@ pub struct NovelApp {
     wizard_realm_dialog: Option<CustomRealm>,
     wizard_count_buf: String,
     wizard_words_buf: String,
+    wizard_new_tmpl_name: String,
+    wizard_new_tmpl_desc: String,
 }
 
 impl NovelApp {
@@ -261,6 +263,8 @@ impl NovelApp {
             wizard_realm_dialog: None,
             wizard_count_buf: String::new(),
             wizard_words_buf: String::new(),
+            wizard_new_tmpl_name: String::new(),
+            wizard_new_tmpl_desc: String::new(),
         };
         if !cfg.setup_done { app.show_settings = true; }
         app
@@ -437,6 +441,7 @@ impl NovelApp {
             reduce_ai_traits: self.project.reduce_ai_traits,
             avoid_famous_names: self.project.avoid_famous_names,
             custom_template_desc: self.project.custom_template_desc.clone(),
+            custom_templates: self.project.custom_templates.clone(),
         });
     }
     fn begin_gen(&mut self) {
@@ -480,6 +485,7 @@ impl NovelApp {
             template_name: self.project.template.clone(),
             extra_templates: self.project.extra_templates.clone(),
             custom_template_desc: self.project.custom_template_desc.clone(),
+            custom_templates: self.project.custom_templates.clone(),
         });
         self.toast("正在规划章节…", ToastKind::Info);
     }
@@ -489,6 +495,18 @@ impl NovelApp {
                 if let Ok(j) = serde_json::to_string_pretty(&self.project) { std::fs::write(path,j).ok(); }
             }
         }
+    }
+    /// 是否有未保存的内容（dirty 标记 或 当前文件未保存且项目非空）
+    fn has_unsaved_content(&self) -> bool {
+        if self.dirty { return true; }
+        if self.current_file.is_none() {
+            // 没保存过的项目，只要有任何实质内容就要提示
+            !self.project.chapters.is_empty()
+                || !self.project.outline.trim().is_empty()
+                || !self.project.optimized_outline.trim().is_empty()
+                || !self.project.custom_realms.is_empty()
+                || !self.project.custom_template_desc.trim().is_empty()
+        } else { false }
     }
     fn do_save(&mut self) {
         let path = self.current_file.clone().unwrap_or_else(|| {
@@ -547,6 +565,8 @@ impl NovelApp {
         self.wizard_words_buf = self.wizard_proj.target_words_per_chapter.to_string();
         self.wizard_page = 0;
         self.wizard_realm_dialog = None;
+        self.wizard_new_tmpl_name.clear();
+        self.wizard_new_tmpl_desc.clear();
         self.show_wizard = true;
     }
 
@@ -745,8 +765,18 @@ impl eframe::App for NovelApp {
             p.rect_filled(screen, Rounding::ZERO, ca(0,0,12, overlay_alpha));
         }
 
+        // 拦截 ⌘+Q / Ctrl+Q 直接退出
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Q)) {
+            if self.has_unsaved_content() {
+                self.show_save_prompt = true;
+                self.save_prompt_action = SavePromptAction::Quit;
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+        // 拦截窗口关闭按钮 / 系统退出
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.dirty {
+            if self.has_unsaved_content() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.show_save_prompt = true;
                 self.save_prompt_action = SavePromptAction::Quit;
@@ -1090,7 +1120,7 @@ impl NovelApp {
                             if self.project.outline.trim().is_empty() { self.toast("请先填写大纲",ToastKind::Err); }
                             else {
                                 self.gen_state=GenState::OptimizingOutline; self.worker.reset_stop();
-                                self.worker.send(WorkerCmd::OptimizeOutline { outline:self.project.outline.clone(), template_name:self.project.template.clone(), extra_templates:self.project.extra_templates.clone(), custom_template_desc:self.project.custom_template_desc.clone() });
+                                self.worker.send(WorkerCmd::OptimizeOutline { outline:self.project.outline.clone(), template_name:self.project.template.clone(), extra_templates:self.project.extra_templates.clone(), custom_template_desc:self.project.custom_template_desc.clone(), custom_templates:self.project.custom_templates.clone() });
                                 self.toast("AI 正在优化大纲…",ToastKind::Info);
                             }
                         }
@@ -1335,6 +1365,8 @@ impl NovelApp {
                             self.wizard_words_buf = self.wizard_proj.target_words_per_chapter.to_string();
                             self.wizard_page = 0;
                             self.wizard_realm_dialog = None;
+                            self.wizard_new_tmpl_name.clear();
+                            self.wizard_new_tmpl_desc.clear();
                             self.show_wizard = true;
                         }
                         ui.add_space(10.0);
@@ -1614,7 +1646,7 @@ impl NovelApp {
                 pos2((inner_rect.min.x - screen.min.x)/sw, (inner_rect.min.y - screen.min.y)/sh),
                 pos2((inner_rect.max.x - screen.min.x)/sw, (inner_rect.max.y - screen.min.y)/sh),
             );
-            let tint = if th.dark { ca(8,10,20,150) } else { ca(255,255,255,160) };
+            let tint = if th.dark { ca(8,10,20,90) } else { ca(255,255,255,95) };
             let p = ui.painter();
             p.image(blur.id(), inner_rect, uv, Color32::WHITE);
             p.rect_filled(inner_rect, R28, tint);
@@ -1688,22 +1720,35 @@ impl NovelApp {
         ui.add_space(10.0);
         let tmpls = all_templates();
         let names: Vec<&str> = tmpls.iter().map(|t| t.name).collect();
-        let mut all_names: Vec<&str> = names.clone();
-        all_names.push("自定义");
-        // 主模板是否是预设
-        let is_preset = names.contains(&self.wizard_proj.template.as_str())
-            || (self.wizard_proj.template.is_empty() && !self.wizard_proj.extra_templates.is_empty());
         let is_selected = |proj: &NovelProject, n: &str| -> bool {
             proj.template == n || proj.extra_templates.iter().any(|x| x == n)
         };
-        for row in all_names.chunks(3) {
+        // 切换选中状态
+        fn toggle(proj: &mut NovelProject, name: &str) {
+            let n = name.to_string();
+            if proj.template == n || proj.extra_templates.iter().any(|x| x == &n) {
+                if proj.template == n {
+                    if proj.extra_templates.is_empty() {
+                        proj.template.clear();
+                    } else {
+                        proj.template = proj.extra_templates.remove(0);
+                    }
+                } else {
+                    proj.extra_templates.retain(|x| x != &n);
+                }
+            } else {
+                if proj.template.is_empty() {
+                    proj.template = n;
+                } else {
+                    proj.extra_templates.push(n);
+                }
+            }
+        }
+        // 预设卡片
+        for row in names.chunks(3) {
             ui.horizontal(|ui| {
                 for name in row {
-                    let active = if *name == "自定义" {
-                        !names.contains(&self.wizard_proj.template.as_str()) && !self.wizard_proj.template.is_empty()
-                    } else {
-                        is_selected(&self.wizard_proj, name)
-                    };
+                    let active = is_selected(&self.wizard_proj, name);
                     let (rect, resp) = ui.allocate_exact_size(Vec2::new(170.0, 56.0), egui::Sense::click());
                     if ui.is_rect_visible(rect) {
                         let bg = if active { th.secondary_container() }
@@ -1716,40 +1761,80 @@ impl NovelApp {
                     }
                     if resp.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
                     if resp.clicked() {
-                        if *name == "自定义" {
-                            // 切换到自定义：清掉所有预设主模板与额外预设，让用户输入自定义名
-                            if names.contains(&self.wizard_proj.template.as_str()) {
-                                self.wizard_proj.template.clear();
-                            }
-                            self.wizard_proj.extra_templates.retain(|n| !names.contains(&n.as_str()));
-                        } else {
-                            let n = name.to_string();
-                            if is_selected(&self.wizard_proj, name) {
-                                // 取消选择
-                                if self.wizard_proj.template == n {
-                                    // 主模板被取消：把第一个 extra 提升为主
-                                    if self.wizard_proj.extra_templates.is_empty() {
-                                        self.wizard_proj.template.clear();
-                                    } else {
-                                        self.wizard_proj.template = self.wizard_proj.extra_templates.remove(0);
-                                    }
-                                } else {
-                                    self.wizard_proj.extra_templates.retain(|x| x != &n);
-                                }
-                            } else {
-                                // 新增
-                                if self.wizard_proj.template.is_empty() {
-                                    self.wizard_proj.template = n;
-                                } else {
-                                    self.wizard_proj.extra_templates.push(n);
-                                }
-                            }
+                        toggle(&mut self.wizard_proj, name);
+                    }
+                }
+            });
+            ui.add_space(6.0);
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(8.0);
+        ui.label(RichText::new("自定义模板").size(13.0).color(th.on_surface_variant()).strong());
+        ui.add_space(8.0);
+
+        // 已添加的自定义模板列表（卡片网格，含 × 删除）
+        let customs = self.wizard_proj.custom_templates.clone();
+        let mut to_delete: Option<usize> = None;
+        let mut to_toggle: Option<String> = None;
+        for row in customs.chunks(3).enumerate().map(|(_, r)| r) {
+            ui.horizontal(|ui| {
+                for ct in row {
+                    let active = is_selected(&self.wizard_proj, &ct.name);
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(170.0, 56.0), egui::Sense::click());
+                    if ui.is_rect_visible(rect) {
+                        let bg = if active { th.secondary_container() }
+                            else if resp.hovered() { th.hover_state(th.surface_container()) }
+                            else { th.surface_container() };
+                        let fg = if active { th.on_secondary_container() } else { th.on_surface() };
+                        ui.painter().rect_filled(rect, R12, bg);
+                        ui.painter().rect_stroke(rect, R12, Stroke::new(1.0, th.outline_variant()));
+                        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, &ct.name, fnt(14.0), fg);
+                    }
+                    if resp.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
+                    if resp.clicked() {
+                        to_toggle = Some(ct.name.clone());
+                    }
+                    // × 删除按钮（右上角）
+                    let close_rect = Rect::from_min_size(
+                        pos2(rect.max.x - 22.0, rect.min.y + 4.0),
+                        Vec2::new(18.0, 18.0),
+                    );
+                    let close_resp = ui.interact(close_rect, ui.id().with(("del_tmpl", &ct.name)), egui::Sense::click());
+                    if ui.is_rect_visible(close_rect) {
+                        let cbg = if close_resp.hovered() { th.error_container() } else { Color32::TRANSPARENT };
+                        ui.painter().rect_filled(close_rect, Rounding::same(9.0), cbg);
+                        let ccol = if close_resp.hovered() { th.on_error_container() } else { th.on_surface_variant() };
+                        ui.painter().text(close_rect.center(), egui::Align2::CENTER_CENTER, "×", fnt(14.0), ccol);
+                    }
+                    if close_resp.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
+                    if close_resp.clicked() {
+                        if let Some(pos) = self.wizard_proj.custom_templates.iter().position(|c| c.name == ct.name) {
+                            to_delete = Some(pos);
                         }
                     }
                 }
             });
             ui.add_space(6.0);
         }
+        if let Some(name) = to_toggle {
+            toggle(&mut self.wizard_proj, &name);
+        }
+        if let Some(idx) = to_delete {
+            let removed = self.wizard_proj.custom_templates.remove(idx);
+            // 从选择中移除
+            if self.wizard_proj.template == removed.name {
+                if self.wizard_proj.extra_templates.is_empty() {
+                    self.wizard_proj.template.clear();
+                } else {
+                    self.wizard_proj.template = self.wizard_proj.extra_templates.remove(0);
+                }
+            } else {
+                self.wizard_proj.extra_templates.retain(|x| x != &removed.name);
+            }
+        }
+
         // 已选数量提示
         {
             let mut total = 0usize;
@@ -1758,28 +1843,50 @@ impl NovelApp {
             ui.add_space(4.0);
             ui.label(RichText::new(format!("已选 {} 个", total)).size(11.5).color(th.on_surface_variant()));
         }
-        if !is_preset {
-            ui.add_space(12.0);
-            card(ui, th, R12, Margin::same(14.0), |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.label(RichText::new("自定义类型名称").size(11.5).color(th.on_surface_variant()));
-                ui.add_space(4.0);
-                ui.add(egui::TextEdit::singleline(&mut self.wizard_proj.template)
-                    .desired_width(f32::INFINITY).text_color(th.on_surface())
-                    .hint_text("如：仙侠现代、克苏鲁、星际机甲…").frame(false));
 
-                ui.add_space(12.0);
-                ui.label(RichText::new("题材简介 / 创作要求").size(11.5).color(th.on_surface_variant()));
-                ui.add_space(4.0);
-                ui.add(egui::TextEdit::multiline(&mut self.wizard_proj.custom_template_desc)
-                    .desired_rows(5).desired_width(f32::INFINITY)
-                    .font(fnt(13.0)).text_color(th.on_surface())
-                    .hint_text("告诉 AI 这是什么样的小说、文风偏好、世界观设定。例：\n\n克苏鲁风格悬疑短篇，主角是民国侦探，文风冷峻克制；\n场景多在阴雨海港，重视氛围铺垫，避免直白展示怪物。")
-                    .frame(false));
-                ui.add_space(4.0);
-                ui.label(RichText::new("提示：填得越具体，AI 越贴合你想要的风格").size(11.0).color(th.outline()));
-            });
-        }
+        // 添加新自定义模板的表单
+        ui.add_space(10.0);
+        card(ui, th, R12, Margin::same(14.0), |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(RichText::new("自定义类型名称").size(11.5).color(th.on_surface_variant()));
+            ui.add_space(4.0);
+            ui.add(egui::TextEdit::singleline(&mut self.wizard_new_tmpl_name)
+                .desired_width(f32::INFINITY).text_color(th.on_surface())
+                .hint_text("如：仙侠现代、克苏鲁、星际机甲…").frame(false));
+
+            ui.add_space(12.0);
+            ui.label(RichText::new("题材简介 / 创作要求").size(11.5).color(th.on_surface_variant()));
+            ui.add_space(4.0);
+            ui.add(egui::TextEdit::multiline(&mut self.wizard_new_tmpl_desc)
+                .desired_rows(5).desired_width(f32::INFINITY)
+                .font(fnt(13.0)).text_color(th.on_surface())
+                .hint_text("告诉 AI 这是什么样的小说、文风偏好、世界观设定。例：\n\n克苏鲁风格悬疑短篇，主角是民国侦探，文风冷峻克制；\n场景多在阴雨海港，重视氛围铺垫，避免直白展示怪物。")
+                .frame(false));
+            ui.add_space(8.0);
+            let clicked = btn_filled(ui, "+ 添加", true, th).clicked();
+            ui.add_space(2.0);
+            ui.label(RichText::new("提示：填得越具体，AI 越贴合你想要的风格").size(11.0).color(th.outline()));
+            if clicked {
+                let name = self.wizard_new_tmpl_name.trim().to_string();
+                if name.is_empty() {
+                    self.toasts.push(Toast::new("请填写自定义模板名称", ToastKind::Err));
+                } else if self.wizard_proj.custom_templates.iter().any(|c| c.name == name)
+                          || all_templates().iter().any(|t| t.name == name) {
+                    self.toasts.push(Toast::new("已存在同名模板", ToastKind::Err));
+                } else {
+                    let desc = self.wizard_new_tmpl_desc.clone();
+                    self.wizard_proj.custom_templates.push(CustomTemplate { name: name.clone(), description: desc });
+                    // 自动选中
+                    if self.wizard_proj.template.is_empty() {
+                        self.wizard_proj.template = name;
+                    } else {
+                        self.wizard_proj.extra_templates.push(name);
+                    }
+                    self.wizard_new_tmpl_name.clear();
+                    self.wizard_new_tmpl_desc.clear();
+                }
+            }
+        });
     }
 
     fn wizard_page_counts(&mut self, ui: &mut egui::Ui, th: Th) {
@@ -2055,7 +2162,7 @@ fn decode_blurred(bytes: &[u8]) -> Result<egui::ColorImage, String> {
         ((img.height() as f32 / img.width() as f32) * img.width().min(320).max(64) as f32) as u32,
         image::imageops::FilterType::Triangle,
     );
-    let blurred = image::imageops::blur(&small.to_rgba8(), 18.0);
+    let blurred = image::imageops::blur(&small.to_rgba8(), 35.0);
     let [w, h] = [blurred.width() as usize, blurred.height() as usize];
     let pixels: Vec<Color32> = blurred.pixels().map(|p| Color32::from_rgba_unmultiplied(p[0],p[1],p[2],p[3])).collect();
     Ok(egui::ColorImage { size:[w,h], pixels })
@@ -2070,7 +2177,7 @@ fn paint_frosted_at(ui: &egui::Ui, slot: egui::layers::ShapeIdx, rect: Rect, rou
         pos2((rect.min.x - screen.min.x) / sw, (rect.min.y - screen.min.y) / sh),
         pos2((rect.max.x - screen.min.x) / sw, (rect.max.y - screen.min.y) / sh),
     );
-    let tint = if th.dark { ca(8,10,20,150) } else { ca(255,255,255,160) };
+    let tint = if th.dark { ca(8,10,20,90) } else { ca(255,255,255,95) };
     ui.painter().set(slot, Shape::Vec(vec![
         Shape::image(blurred.id(), rect, uv, Color32::WHITE),
         Shape::rect_filled(rect, rounding, tint),

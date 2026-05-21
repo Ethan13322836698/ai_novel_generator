@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
 use crate::config::AppConfig;
+use crate::novel::CustomTemplate;
 
 #[derive(Debug)]
 pub enum WorkerCmd {
@@ -11,6 +12,7 @@ pub enum WorkerCmd {
         template_name: String,
         extra_templates: Vec<String>,
         custom_template_desc: String,
+        custom_templates: Vec<CustomTemplate>,
     },
     GeneratePlan {
         title: String,
@@ -19,6 +21,7 @@ pub enum WorkerCmd {
         template_name: String,
         extra_templates: Vec<String>,
         custom_template_desc: String,
+        custom_templates: Vec<CustomTemplate>,
     },
     GenerateChapter {
         num: usize,
@@ -36,8 +39,18 @@ pub enum WorkerCmd {
         avoid_famous_names: bool,
         /// 自定义模板简介（template_name 不在内置列表时使用）
         custom_template_desc: String,
+        custom_templates: Vec<CustomTemplate>,
     },
     Stop,
+}
+
+fn append_custom_template_prompt(system: &mut String, name: &str, customs: &[CustomTemplate]) {
+    if let Some(ct) = customs.iter().find(|c| c.name == name) {
+        if !ct.description.trim().is_empty() {
+            system.push_str("\n\n---\n\n");
+            system.push_str(&format!("本作还需符合「{}」类型要求：\n{}", ct.name, ct.description));
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -99,7 +112,7 @@ fn run_worker(
             WorkerCmd::Stop => {
                 stop.store(true, Ordering::SeqCst);
             }
-            WorkerCmd::OptimizeOutline { outline, template_name, extra_templates, custom_template_desc } => {
+            WorkerCmd::OptimizeOutline { outline, template_name, extra_templates, custom_template_desc, custom_templates } => {
                 let cfg = config.lock().unwrap().clone();
                 let tmpl = crate::templates::get_template_by_name(&template_name);
                 let (mut system, prompt) = if let Some(t) = tmpl {
@@ -113,10 +126,15 @@ fn run_worker(
                     };
                     (sys, format!("请优化以下小说大纲，使其更加丰富完善：\n{}", outline))
                 };
+                if crate::templates::get_template_by_name(&template_name).is_none() {
+                    append_custom_template_prompt(&mut system, &template_name, &custom_templates);
+                }
                 for name in &extra_templates {
                     if let Some(t) = crate::templates::get_template_by_name(name) {
                         system.push_str("\n\n---\n\n");
                         system.push_str(t.system_prompt);
+                    } else {
+                        append_custom_template_prompt(&mut system, name, &custom_templates);
                     }
                 }
                 let messages = vec![
@@ -132,7 +150,7 @@ fn run_worker(
                     }
                 }
             }
-            WorkerCmd::GeneratePlan { title, outline, count, template_name, extra_templates, custom_template_desc } => {
+            WorkerCmd::GeneratePlan { title, outline, count, template_name, extra_templates, custom_template_desc, custom_templates } => {
                 let cfg = config.lock().unwrap().clone();
                 let tmpl = crate::templates::get_template_by_name(&template_name);
                 let (mut system, prompt_template_str) = if let Some(t) = tmpl {
@@ -145,10 +163,15 @@ fn run_worker(
                     };
                     (sys, "请为小说《{title}》生成{count}章的章节规划，格式：第X章 章节标题\\n本章要点（30字内）\n大纲：{outline}".to_string())
                 };
+                if crate::templates::get_template_by_name(&template_name).is_none() {
+                    append_custom_template_prompt(&mut system, &template_name, &custom_templates);
+                }
                 for name in &extra_templates {
                     if let Some(t) = crate::templates::get_template_by_name(name) {
                         system.push_str("\n\n---\n\n");
                         system.push_str(t.system_prompt);
+                    } else {
+                        append_custom_template_prompt(&mut system, name, &custom_templates);
                     }
                 }
                 let prompt = prompt_template_str
@@ -172,7 +195,7 @@ fn run_worker(
             WorkerCmd::GenerateChapter {
                 num, chapter_title, brief, novel_title, outline,
                 context, template_name, extra_templates, words, realm_info,
-                reduce_ai_traits, avoid_famous_names, custom_template_desc,
+                reduce_ai_traits, avoid_famous_names, custom_template_desc, custom_templates,
             } => {
                 let cfg = config.lock().unwrap().clone();
                 let tmpl = crate::templates::get_template_by_name(&template_name);
@@ -186,10 +209,15 @@ fn run_worker(
                     };
                     (sys, "请创作小说《{title}》第{num}章 {chapter_title}，本章要点：{brief}，前情：{context}，大纲：{outline}，约{words}字。".to_string())
                 };
+                if crate::templates::get_template_by_name(&template_name).is_none() {
+                    append_custom_template_prompt(&mut system, &template_name, &custom_templates);
+                }
                 for name in &extra_templates {
                     if let Some(t) = crate::templates::get_template_by_name(name) {
                         system.push_str("\n\n---\n\n");
                         system.push_str(t.system_prompt);
+                    } else {
+                        append_custom_template_prompt(&mut system, name, &custom_templates);
                     }
                 }
                 // 拼接境界体系说明（控制 token：非空才追加）

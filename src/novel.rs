@@ -75,6 +75,8 @@ pub struct NovelProject {
     pub reduce_ai_traits: bool,
     pub avoid_famous_names: bool,
     pub custom_realms: Vec<CustomRealm>,
+    /// 自定义模板的简介/创作要求（template 不是内置模板时使用）
+    pub custom_template_desc: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -95,6 +97,7 @@ impl Default for NovelProject {
             reduce_ai_traits: false,
             avoid_famous_names: false,
             custom_realms: Vec::new(),
+            custom_template_desc: String::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

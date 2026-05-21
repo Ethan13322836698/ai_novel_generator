@@ -9,12 +9,14 @@ pub enum WorkerCmd {
     OptimizeOutline {
         outline: String,
         template_name: String,
+        custom_template_desc: String,
     },
     GeneratePlan {
         title: String,
         outline: String,
         count: usize,
         template_name: String,
+        custom_template_desc: String,
     },
     GenerateChapter {
         num: usize,
@@ -29,6 +31,8 @@ pub enum WorkerCmd {
         realm_info: String,
         reduce_ai_traits: bool,
         avoid_famous_names: bool,
+        /// 自定义模板简介（template_name 不在内置列表时使用）
+        custom_template_desc: String,
     },
     Stop,
 }
@@ -92,17 +96,22 @@ fn run_worker(
             WorkerCmd::Stop => {
                 stop.store(true, Ordering::SeqCst);
             }
-            WorkerCmd::OptimizeOutline { outline, template_name } => {
+            WorkerCmd::OptimizeOutline { outline, template_name, custom_template_desc } => {
                 let cfg = config.lock().unwrap().clone();
                 let tmpl = crate::templates::get_template_by_name(&template_name);
                 let (system, prompt) = if let Some(t) = tmpl {
                     let p = t.outline_optimize_prompt.replace("{outline}", &outline);
-                    (t.system_prompt, p)
+                    (t.system_prompt.to_string(), p)
                 } else {
-                    ("你是专业小说作家。", format!("请优化以下小说大纲，使其更加丰富完善：\n{}", outline))
+                    let sys = if custom_template_desc.trim().is_empty() {
+                        format!("你是专业小说作家，擅长「{}」类型作品。", template_name)
+                    } else {
+                        format!("你是专业小说作家。本作类型「{}」的创作要求：\n{}", template_name, custom_template_desc)
+                    };
+                    (sys, format!("请优化以下小说大纲，使其更加丰富完善：\n{}", outline))
                 };
                 let messages = vec![
-                    msg("system", system),
+                    msg("system", &system),
                     msg("user", &prompt),
                 ];
                 match stream_chat(&cfg, messages, &stop, &tx) {
@@ -114,20 +123,25 @@ fn run_worker(
                     }
                 }
             }
-            WorkerCmd::GeneratePlan { title, outline, count, template_name } => {
+            WorkerCmd::GeneratePlan { title, outline, count, template_name, custom_template_desc } => {
                 let cfg = config.lock().unwrap().clone();
                 let tmpl = crate::templates::get_template_by_name(&template_name);
                 let (system, prompt_template_str) = if let Some(t) = tmpl {
-                    (t.system_prompt, t.plan_prompt.to_string())
+                    (t.system_prompt.to_string(), t.plan_prompt.to_string())
                 } else {
-                    ("你是专业小说作家。", "请为小说《{title}》生成{count}章的章节规划，格式：第X章 章节标题\\n本章要点（30字内）\n大纲：{outline}".to_string())
+                    let sys = if custom_template_desc.trim().is_empty() {
+                        format!("你是专业小说作家，擅长「{}」类型作品。", template_name)
+                    } else {
+                        format!("你是专业小说作家。本作类型「{}」的创作要求：\n{}", template_name, custom_template_desc)
+                    };
+                    (sys, "请为小说《{title}》生成{count}章的章节规划，格式：第X章 章节标题\\n本章要点（30字内）\n大纲：{outline}".to_string())
                 };
                 let prompt = prompt_template_str
                     .replace("{title}", &title)
                     .replace("{count}", &count.to_string())
                     .replace("{outline}", &outline);
                 let messages = vec![
-                    msg("system", system),
+                    msg("system", &system),
                     msg("user", &prompt),
                 ];
                 match stream_chat(&cfg, messages, &stop, &tx) {
@@ -143,14 +157,19 @@ fn run_worker(
             WorkerCmd::GenerateChapter {
                 num, chapter_title, brief, novel_title, outline,
                 context, template_name, words, realm_info,
-                reduce_ai_traits, avoid_famous_names,
+                reduce_ai_traits, avoid_famous_names, custom_template_desc,
             } => {
                 let cfg = config.lock().unwrap().clone();
                 let tmpl = crate::templates::get_template_by_name(&template_name);
                 let (system, prompt_template_str) = if let Some(t) = tmpl {
-                    (t.system_prompt, t.chapter_prompt.to_string())
+                    (t.system_prompt.to_string(), t.chapter_prompt.to_string())
                 } else {
-                    ("你是专业小说作家。", "请创作小说《{title}》第{num}章 {chapter_title}，本章要点：{brief}，前情：{context}，大纲：{outline}，约{words}字。".to_string())
+                    let sys = if custom_template_desc.trim().is_empty() {
+                        format!("你是专业小说作家，擅长「{}」类型作品。", template_name)
+                    } else {
+                        format!("你是专业小说作家。本作类型「{}」的创作要求：\n{}", template_name, custom_template_desc)
+                    };
+                    (sys, "请创作小说《{title}》第{num}章 {chapter_title}，本章要点：{brief}，前情：{context}，大纲：{outline}，约{words}字。".to_string())
                 };
                 // 拼接境界体系说明（控制 token：非空才追加）
                 let full_outline = if realm_info.is_empty() {
@@ -173,7 +192,7 @@ fn run_worker(
                     prompt.push_str("\n\n禁用以下主角名（防止与知名小说雷同）：陈平安、韩立、王林、楚天南、萧炎、唐三、洛天、罗峰、林动、叶凡、石昊、孟浩、王腾、李慕白、徐凤年、宁缺、傅红雪。请使用原创姓名。");
                 }
                 let messages = vec![
-                    msg("system", system),
+                    msg("system", &system),
                     msg("user", &prompt),
                 ];
                 match stream_chat(&cfg, messages, &stop, &tx) {

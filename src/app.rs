@@ -391,6 +391,7 @@ impl NovelApp {
             words: self.project.target_words_per_chapter, realm_info,
             reduce_ai_traits: self.project.reduce_ai_traits,
             avoid_famous_names: self.project.avoid_famous_names,
+            custom_template_desc: self.project.custom_template_desc.clone(),
         });
     }
     fn begin_gen(&mut self) {
@@ -432,6 +433,7 @@ impl NovelApp {
             outline: truncate_chars(&outline, 1500),
             count: self.project.target_chapters,
             template_name: self.project.template.clone(),
+            custom_template_desc: self.project.custom_template_desc.clone(),
         });
         self.toast("正在规划章节…", ToastKind::Info);
     }
@@ -694,14 +696,12 @@ impl eframe::App for NovelApp {
         }
 
         self.draw_top_bar(ctx, th);
-        self.draw_nav_drawer(ctx, th);
-        self.draw_inspector(ctx, th, font_sz);
+        if !self.show_wizard { self.draw_nav_drawer(ctx, th); }
         self.draw_center(ctx, th, font_sz);
         self.draw_toasts(ctx, th);
         if self.show_settings { self.draw_settings(ctx, th); }
         if self.show_about    { self.draw_about(ctx, th); }
         if self.show_save_prompt { self.draw_save_prompt(ctx, th); }
-        if self.show_wizard { self.draw_wizard(ctx, th); }
     }
 }
 
@@ -1033,7 +1033,7 @@ impl NovelApp {
                             if self.project.outline.trim().is_empty() { self.toast("请先填写大纲",ToastKind::Err); }
                             else {
                                 self.gen_state=GenState::OptimizingOutline; self.worker.reset_stop();
-                                self.worker.send(WorkerCmd::OptimizeOutline { outline:self.project.outline.clone(), template_name:self.project.template.clone() });
+                                self.worker.send(WorkerCmd::OptimizeOutline { outline:self.project.outline.clone(), template_name:self.project.template.clone(), custom_template_desc:self.project.custom_template_desc.clone() });
                                 self.toast("AI 正在优化大纲…",ToastKind::Info);
                             }
                         }
@@ -1152,6 +1152,14 @@ impl NovelApp {
 impl NovelApp {
     fn draw_center(&mut self, ctx: &egui::Context, th: Th, font_sz: f32) {
         let center_fill = if self.bg_texture.is_some() { Color32::TRANSPARENT } else { th.surface() };
+        // 向导模式：占据整个中央区域，不显示章节编辑器
+        if self.show_wizard {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none().fill(center_fill).inner_margin(Margin::symmetric(40.0, 24.0)))
+                .show(ctx, |ui| { self.draw_wizard_inline(ui, th); });
+            if self.wizard_realm_dialog.is_some() { self.draw_wizard_realm_dialog(ctx, th); }
+            return;
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(center_fill).inner_margin(Margin::same(0.0)))
             .show(ctx, |ui| {
@@ -1249,35 +1257,25 @@ impl NovelApp {
             });
     }
 
-    fn draw_welcome(&self, ui: &mut egui::Ui, th: Th) {
+    fn draw_welcome(&mut self, ui: &mut egui::Ui, th: Th) {
         ui.vertical_centered(|ui| {
-            ui.add_space(60.0);
+            ui.add_space(80.0);
             ui.label(RichText::new("✍").size(72.0));
             ui.add_space(16.0);
             ui.label(RichText::new("AI 全自动小说创作").size(26.0).color(th.on_surface()).strong());
             ui.add_space(8.0);
-            ui.label(RichText::new("选择类型  ·  填写大纲  ·  AI 优化  ·  一键生成全书").size(13.5).color(th.on_surface_variant()));
-            ui.add_space(36.0);
-            card(ui, th, R28, Margin::same(28.0), |ui| {
-                ui.set_max_width(480.0);
-                for (icon,title,desc) in [
-                    ("🔌","多接口支持","DeepSeek · ChatGPT · Gemini · Ollama · 自定义 API"),
-                    ("📚","12 种类型模板","修仙 · 玄幻 · 武道 · 都市 · 末世 · 科幻 · 无限流…"),
-                    ("🤖","全自动续写","AI 规划章节，逐章生成，自动衔接上下文"),
-                    ("🏆","境界体系注入","22 种境界多选，自动融入创作 Prompt"),
-                    ("💾","本地项目保存","JSON 格式，⌘S / Ctrl+S 快速保存"),
-                ] {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(icon).size(22.0));
-                        ui.add_space(12.0);
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new(title).size(13.5).color(th.on_surface()).strong());
-                            ui.label(RichText::new(desc).size(12.5).color(th.on_surface_variant()));
-                        });
-                    });
-                    ui.add_space(14.0);
-                }
-            });
+            ui.label(RichText::new("4 步向导 → 一键生成全书").size(13.5).color(th.on_surface_variant()));
+            ui.add_space(32.0);
+            if btn_filled(ui, "✨  新建小说", true, th).clicked() {
+                self.wizard_proj = NovelProject::default();
+                self.wizard_count_buf = self.wizard_proj.target_chapters.to_string();
+                self.wizard_words_buf = self.wizard_proj.target_words_per_chapter.to_string();
+                self.wizard_page = 0;
+                self.wizard_realm_dialog = None;
+                self.show_wizard = true;
+            }
+            ui.add_space(10.0);
+            if btn_outlined(ui, "📂  打开已有项目", true, th).clicked() { self.do_open(); }
         });
     }
 }
@@ -1517,41 +1515,46 @@ impl NovelApp {
             });
     }
 
-    fn draw_wizard(&mut self, ctx: &egui::Context, th: Th) {
-        let win_fill = th.surface_container_low();
+    fn draw_wizard_inline(&mut self, ui: &mut egui::Ui, th: Th) {
         let page = self.wizard_page;
         let mut cancel = false;
         let mut next = false;
         let mut prev = false;
         let mut finish = false;
 
-        egui::Window::new("新建小说").resizable(false).collapsible(false).title_bar(false)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).fixed_size(Vec2::new(600.0, 500.0))
-            .frame(egui::Frame::window(&ctx.style()).fill(win_fill).stroke(Stroke::new(1.0,th.outline_variant())).rounding(R28).inner_margin(Margin::same(20.0)))
-            .show(ctx, |ui| {
+        // 居中容器，最大宽度 720
+        let avail_w = ui.available_width();
+        let max_w = avail_w.min(720.0);
+        let pad_x = (avail_w - max_w) / 2.0;
+        ui.horizontal(|ui| {
+            ui.add_space(pad_x);
+            ui.allocate_ui(Vec2::new(max_w, ui.available_height()), |ui| {
                 // Header
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("✨  新建小说").size(18.0).color(th.on_surface()).strong());
+                    ui.label(RichText::new("✨  新建小说").size(22.0).color(th.on_surface()).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if btn_text(ui, "✕ 取消", th.on_surface_variant()).clicked() { cancel = true; }
                     });
                 });
-                ui.add_space(8.0);
-                // Progress dots
+                ui.add_space(10.0);
+                // Progress
                 ui.horizontal(|ui| {
                     let titles = ["类型模板","章节字数","修炼体系","标题大纲"];
                     for (i, t) in titles.iter().enumerate() {
                         let active = i as u8 == page;
-                        let col = if active { th.primary() } else { th.on_surface_variant() };
-                        ui.label(RichText::new(format!("{}.{}", i+1, t)).size(12.0).color(col).strong());
-                        if i < titles.len()-1 { ui.label(RichText::new("›").size(12.0).color(th.on_surface_variant())); }
+                        let done = (i as u8) < page;
+                        let col = if active { th.primary() } else if done { th.on_tertiary_container() } else { th.on_surface_variant() };
+                        let sym = if done { "✓" } else { "○" };
+                        ui.label(RichText::new(format!("{}  {}.{}", sym, i+1, t)).size(12.5).color(col).strong());
+                        if i < titles.len()-1 { ui.add_space(4.0); ui.label(RichText::new("›").size(12.0).color(th.on_surface_variant())); ui.add_space(4.0); }
                     }
                 });
-                ui.add_space(4.0);
-                ui.add(egui::Separator::default().spacing(8.0));
                 ui.add_space(8.0);
+                ui.add(egui::Separator::default().spacing(6.0));
+                ui.add_space(12.0);
 
-                egui::ScrollArea::vertical().max_height(380.0).auto_shrink([false;2]).show(ui, |ui| {
+                let avail_h = ui.available_height() - 70.0;
+                egui::ScrollArea::vertical().id_salt("wizard_scroll").max_height(avail_h.max(200.0)).auto_shrink([false;2]).show(ui, |ui| {
                     match page {
                         0 => self.wizard_page_template(ui, th),
                         1 => self.wizard_page_counts(ui, th),
@@ -1560,27 +1563,26 @@ impl NovelApp {
                     }
                 });
 
-                ui.add_space(10.0);
+                ui.add_space(12.0);
                 ui.add(egui::Separator::default().spacing(4.0));
-                ui.add_space(8.0);
+                ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if page > 0 { if btn_outlined(ui,"← 上一步",true,th).clicked() { prev = true; } }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if page < 3 {
                             if btn_filled(ui,"下一步 →",true,th).clicked() { next = true; }
                         } else {
-                            if btn_filled(ui,"✓ 完成",true,th).clicked() { finish = true; }
+                            if btn_filled(ui,"✓  完成",true,th).clicked() { finish = true; }
                         }
                     });
                 });
             });
+        });
 
         if cancel { self.show_wizard = false; self.wizard_realm_dialog = None; }
         if prev && self.wizard_page > 0 { self.wizard_page -= 1; }
         if next && self.wizard_page < 3 { self.wizard_page += 1; }
         if finish { self.finish_wizard(); }
-
-        if self.wizard_realm_dialog.is_some() { self.draw_wizard_realm_dialog(ctx, th); }
     }
 
     fn wizard_page_template(&mut self, ui: &mut egui::Ui, th: Th) {
@@ -1618,11 +1620,26 @@ impl NovelApp {
             ui.add_space(6.0);
         }
         if !is_preset {
-            ui.add_space(10.0);
-            ui.label(RichText::new("自定义类型名称").size(11.5).color(th.on_surface_variant()));
-            ui.add_space(4.0);
-            ui.add(egui::TextEdit::singleline(&mut self.wizard_proj.template)
-                .desired_width(f32::INFINITY).text_color(th.on_surface()).hint_text("如：仙侠现代…"));
+            ui.add_space(12.0);
+            card(ui, th, R12, Margin::same(14.0), |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(RichText::new("自定义类型名称").size(11.5).color(th.on_surface_variant()));
+                ui.add_space(4.0);
+                ui.add(egui::TextEdit::singleline(&mut self.wizard_proj.template)
+                    .desired_width(f32::INFINITY).text_color(th.on_surface())
+                    .hint_text("如：仙侠现代、克苏鲁、星际机甲…").frame(false));
+
+                ui.add_space(12.0);
+                ui.label(RichText::new("题材简介 / 创作要求").size(11.5).color(th.on_surface_variant()));
+                ui.add_space(4.0);
+                ui.add(egui::TextEdit::multiline(&mut self.wizard_proj.custom_template_desc)
+                    .desired_rows(5).desired_width(f32::INFINITY)
+                    .font(fnt(13.0)).text_color(th.on_surface())
+                    .hint_text("告诉 AI 这是什么样的小说、文风偏好、世界观设定。例：\n\n克苏鲁风格悬疑短篇，主角是民国侦探，文风冷峻克制；\n场景多在阴雨海港，重视氛围铺垫，避免直白展示怪物。")
+                    .frame(false));
+                ui.add_space(4.0);
+                ui.label(RichText::new("提示：填得越具体，AI 越贴合你想要的风格").size(11.0).color(th.outline()));
+            });
         }
     }
 

@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use egui::{Color32, FontId, Rounding, RichText, Stroke, Vec2, Margin, Rect, pos2, Shape};
 use crate::api::{ApiWorker, WorkerCmd, WorkerMsg};
 use crate::config::{provider_presets, AppConfig};
@@ -198,8 +198,12 @@ pub struct NovelApp {
     // 外观
     dark_mode:   bool,
 
-    // 背景图
-    bg_texture:   Option<egui::TextureHandle>,
+    // 背景图（支持 GIF 多帧）
+    bg_frames:        Vec<egui::TextureHandle>,
+    bg_delays_ms:     Vec<u32>,
+    bg_frame_idx:     usize,
+    bg_last_advance:  Option<Instant>,
+    bg_blurred:       Option<egui::TextureHandle>,
     bg_source:    BgSource,
     bg_url_input: String,
     bg_loading:   bool,
@@ -239,7 +243,9 @@ impl NovelApp {
             s_max_tokens:  cfg.max_tokens.to_string(), s_font_size: cfg.font_size,
             s_test_result: None,
             dark_mode: false,
-            bg_texture: None, bg_source: BgSource::None,
+            bg_frames: Vec::new(), bg_delays_ms: Vec::new(),
+            bg_frame_idx: 0, bg_last_advance: None, bg_blurred: None,
+            bg_source: BgSource::None,
             bg_url_input: String::new(), bg_loading: false, bg_rx: None,
             pick_local_bg: false,
             project, config,
@@ -268,18 +274,56 @@ impl NovelApp {
 
     // ── 背景图加载 ─────────────────────────────────────
     fn load_bg_bytes(&mut self, ctx: &egui::Context, bytes: Vec<u8>) {
-        match decode_image(&bytes) {
-            Ok(ci) => {
-                self.bg_texture = Some(ctx.load_texture("bg", ci, egui::TextureOptions::LINEAR));
-                self.toast("背景已加载 ✓", ToastKind::Ok);
+        // 探测 GIF：以 "GIF8" 头判定
+        let is_gif = bytes.len() >= 4 && &bytes[..4] == b"GIF8";
+        if is_gif {
+            match decode_gif(&bytes) {
+                Ok((frames, delays)) => {
+                    let mut textures = Vec::with_capacity(frames.len());
+                    for (i, ci) in frames.iter().enumerate() {
+                        textures.push(ctx.load_texture(format!("bg_f{}", i), ci.clone(), egui::TextureOptions::LINEAR));
+                    }
+                    // 模糊版以首帧为准
+                    if let Some(first_blur) = frames.first().and_then(|_| decode_blurred(&bytes).ok()) {
+                        self.bg_blurred = Some(ctx.load_texture("bg_blur", first_blur, egui::TextureOptions::LINEAR));
+                    }
+                    self.bg_frames = textures;
+                    self.bg_delays_ms = delays;
+                    self.bg_frame_idx = 0;
+                    self.bg_last_advance = Some(Instant::now());
+                    self.toast("背景已加载 ✓", ToastKind::Ok);
+                }
+                Err(e) => self.toast(format!("GIF 解析失败: {}", e), ToastKind::Err),
             }
-            Err(e) => self.toast(format!("图片解析失败: {}", e), ToastKind::Err),
+        } else {
+            match decode_image(&bytes) {
+                Ok(ci) => {
+                    let tex = ctx.load_texture("bg", ci, egui::TextureOptions::LINEAR);
+                    self.bg_frames = vec![tex];
+                    self.bg_delays_ms = vec![0];
+                    self.bg_frame_idx = 0;
+                    self.bg_last_advance = None;
+                    if let Ok(blur) = decode_blurred(&bytes) {
+                        self.bg_blurred = Some(ctx.load_texture("bg_blur", blur, egui::TextureOptions::LINEAR));
+                    }
+                    self.toast("背景已加载 ✓", ToastKind::Ok);
+                }
+                Err(e) => self.toast(format!("图片解析失败: {}", e), ToastKind::Err),
+            }
         }
         self.bg_loading = false;
     }
+    fn clear_bg(&mut self) {
+        self.bg_frames.clear();
+        self.bg_delays_ms.clear();
+        self.bg_frame_idx = 0;
+        self.bg_last_advance = None;
+        self.bg_blurred = None;
+        self.bg_source = BgSource::None;
+    }
     fn load_bg_local(&mut self, ctx: &egui::Context) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("图片", &["png","jpg","jpeg","webp"]).pick_file()
+            .add_filter("图片", &["png","jpg","jpeg","webp","gif"]).pick_file()
         {
             match std::fs::read(&path) {
                 Ok(bytes) => { self.bg_source = BgSource::Local(path); self.load_bg_bytes(ctx, bytes); }
@@ -388,6 +432,7 @@ impl NovelApp {
             num, chapter_title: title, brief,
             novel_title: self.project.title.clone(), outline, context,
             template_name: self.project.template.clone(),
+            extra_templates: self.project.extra_templates.clone(),
             words: self.project.target_words_per_chapter, realm_info,
             reduce_ai_traits: self.project.reduce_ai_traits,
             avoid_famous_names: self.project.avoid_famous_names,
@@ -433,6 +478,7 @@ impl NovelApp {
             outline: truncate_chars(&outline, 1500),
             count: self.project.target_chapters,
             template_name: self.project.template.clone(),
+            extra_templates: self.project.extra_templates.clone(),
             custom_template_desc: self.project.custom_template_desc.clone(),
         });
         self.toast("正在规划章节…", ToastKind::Info);
@@ -678,8 +724,20 @@ impl eframe::App for NovelApp {
 
         apply_theme(ctx, th);
 
-        // 背景图层
-        if let Some(tex) = &self.bg_texture {
+        // 背景图层（含 GIF 动画）
+        if !self.bg_frames.is_empty() {
+            // 推进动画帧
+            if self.bg_frames.len() > 1 {
+                let now = Instant::now();
+                let last = self.bg_last_advance.unwrap_or(now);
+                let delay = self.bg_delays_ms.get(self.bg_frame_idx).copied().unwrap_or(100).max(20);
+                if now.duration_since(last) >= Duration::from_millis(delay as u64) {
+                    self.bg_frame_idx = (self.bg_frame_idx + 1) % self.bg_frames.len();
+                    self.bg_last_advance = Some(now);
+                }
+                ctx.request_repaint_after(Duration::from_millis(delay as u64));
+            }
+            let tex = &self.bg_frames[self.bg_frame_idx.min(self.bg_frames.len()-1)];
             let screen = ctx.screen_rect();
             let p = ctx.layer_painter(egui::LayerId::background());
             p.image(tex.id(), screen, Rect::from_min_max(pos2(0.0,0.0), pos2(1.0,1.0)), Color32::WHITE);
@@ -1032,7 +1090,7 @@ impl NovelApp {
                             if self.project.outline.trim().is_empty() { self.toast("请先填写大纲",ToastKind::Err); }
                             else {
                                 self.gen_state=GenState::OptimizingOutline; self.worker.reset_stop();
-                                self.worker.send(WorkerCmd::OptimizeOutline { outline:self.project.outline.clone(), template_name:self.project.template.clone(), custom_template_desc:self.project.custom_template_desc.clone() });
+                                self.worker.send(WorkerCmd::OptimizeOutline { outline:self.project.outline.clone(), template_name:self.project.template.clone(), extra_templates:self.project.extra_templates.clone(), custom_template_desc:self.project.custom_template_desc.clone() });
                                 self.toast("AI 正在优化大纲…",ToastKind::Info);
                             }
                         }
@@ -1150,7 +1208,7 @@ impl NovelApp {
 // ═══════════════════════════════════════════════════════
 impl NovelApp {
     fn draw_center(&mut self, ctx: &egui::Context, th: Th, font_sz: f32) {
-        let center_fill = if self.bg_texture.is_some() { Color32::TRANSPARENT } else { th.surface() };
+        let center_fill = if !self.bg_frames.is_empty() { Color32::TRANSPARENT } else { th.surface() };
         // 向导模式：占据整个中央区域，不显示章节编辑器
         if self.show_wizard {
             egui::CentralPanel::default()
@@ -1257,24 +1315,33 @@ impl NovelApp {
     }
 
     fn draw_welcome(&mut self, ui: &mut egui::Ui, th: Th) {
+        let blurred = self.bg_blurred.clone();
         ui.vertical_centered(|ui| {
-            ui.add_space(80.0);
-            ui.label(RichText::new("✍").size(72.0));
-            ui.add_space(16.0);
-            ui.label(RichText::new("AI 全自动小说创作").size(26.0).color(th.on_surface()).strong());
-            ui.add_space(8.0);
-            ui.label(RichText::new("4 步向导 → 一键生成全书").size(13.5).color(th.on_surface_variant()));
-            ui.add_space(32.0);
-            if btn_filled(ui, "✨  新建小说", true, th).clicked() {
-                self.wizard_proj = NovelProject::default();
-                self.wizard_count_buf = self.wizard_proj.target_chapters.to_string();
-                self.wizard_words_buf = self.wizard_proj.target_words_per_chapter.to_string();
-                self.wizard_page = 0;
-                self.wizard_realm_dialog = None;
-                self.show_wizard = true;
-            }
-            ui.add_space(10.0);
-            if btn_outlined(ui, "📂  打开已有项目", true, th).clicked() { self.do_open(); }
+            ui.add_space(60.0);
+            let avail = ui.available_width().min(520.0);
+            ui.allocate_ui_with_layout(Vec2::new(avail, 0.0), egui::Layout::top_down(egui::Align::Center), |ui| {
+                card_or_frosted(ui, th, R28, Margin::symmetric(28.0, 32.0), blurred.as_ref(), |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.vertical_centered(|ui| {
+                        ui.label(RichText::new("✍").size(72.0));
+                        ui.add_space(16.0);
+                        ui.label(RichText::new("AI 全自动小说创作").size(26.0).color(th.on_surface()).strong());
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("4 步向导 → 一键生成全书").size(13.5).color(th.on_surface_variant()));
+                        ui.add_space(32.0);
+                        if btn_filled(ui, "✨  新建小说", true, th).clicked() {
+                            self.wizard_proj = NovelProject::default();
+                            self.wizard_count_buf = self.wizard_proj.target_chapters.to_string();
+                            self.wizard_words_buf = self.wizard_proj.target_words_per_chapter.to_string();
+                            self.wizard_page = 0;
+                            self.wizard_realm_dialog = None;
+                            self.show_wizard = true;
+                        }
+                        ui.add_space(10.0);
+                        if btn_outlined(ui, "📂  打开已有项目", true, th).clicked() { self.do_open(); }
+                    });
+                });
+            });
         });
     }
 }
@@ -1410,7 +1477,7 @@ impl NovelApp {
                     };
                     ui.label(RichText::new(cur_src).size(12.0).color(th.on_surface_variant()));
                     ui.add_space(8.0);
-                    ui.label(RichText::new("图片链接（JPG / PNG / WebP）").size(11.5).color(th.on_surface_variant()));
+                    ui.label(RichText::new("图片链接（JPG / PNG / WebP / GIF）").size(11.5).color(th.on_surface_variant()));
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.bg_url_input).desired_width(ui.available_width()-116.0).text_color(th.on_surface()).hint_text("https://…"));
@@ -1421,8 +1488,8 @@ impl NovelApp {
                     ui.horizontal(|ui| {
                         if btn_tonal(ui,"📁  本地图片",true,th).clicked() { self.pick_local_bg=true; }
                         ui.add_space(6.0);
-                        if btn_outlined(ui,"✕  清除背景",self.bg_texture.is_some(),th).clicked() {
-                            self.bg_texture=None; self.bg_source=BgSource::None;
+                        if btn_outlined(ui,"✕  清除背景",!self.bg_frames.is_empty(),th).clicked() {
+                            self.clear_bg();
                             self.toast("背景已清除",ToastKind::Info);
                         }
                     });
@@ -1539,6 +1606,20 @@ impl NovelApp {
             pos2(rect.min.x + pad_x, rect.min.y),
             Vec2::new(max_w, total_h),
         );
+        // 毛玻璃背板：若加载了背景，给整个向导区域绘制半透模糊底
+        if let Some(blur) = self.bg_blurred.clone() {
+            let screen = ui.ctx().screen_rect();
+            let sw = screen.width().max(1.0); let sh = screen.height().max(1.0);
+            let uv = Rect::from_min_max(
+                pos2((inner_rect.min.x - screen.min.x)/sw, (inner_rect.min.y - screen.min.y)/sh),
+                pos2((inner_rect.max.x - screen.min.x)/sw, (inner_rect.max.y - screen.min.y)/sh),
+            );
+            let tint = if th.dark { ca(8,10,20,150) } else { ca(255,255,255,160) };
+            let p = ui.painter();
+            p.image(blur.id(), inner_rect, uv, Color32::WHITE);
+            p.rect_filled(inner_rect, R28, tint);
+            p.rect_stroke(inner_rect, R28, Stroke::new(1.0, ca(255,255,255,60)));
+        }
         let mut content_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(inner_rect)
@@ -1603,17 +1684,26 @@ impl NovelApp {
     }
 
     fn wizard_page_template(&mut self, ui: &mut egui::Ui, th: Th) {
-        ui.label(RichText::new("选择小说类型").size(13.0).color(th.on_surface_variant()));
+        ui.label(RichText::new("选择小说类型（可多选，将合并多种风格）").size(13.0).color(th.on_surface_variant()));
         ui.add_space(10.0);
         let tmpls = all_templates();
         let names: Vec<&str> = tmpls.iter().map(|t| t.name).collect();
         let mut all_names: Vec<&str> = names.clone();
         all_names.push("自定义");
-        let is_preset = names.contains(&self.wizard_proj.template.as_str());
+        // 主模板是否是预设
+        let is_preset = names.contains(&self.wizard_proj.template.as_str())
+            || (self.wizard_proj.template.is_empty() && !self.wizard_proj.extra_templates.is_empty());
+        let is_selected = |proj: &NovelProject, n: &str| -> bool {
+            proj.template == n || proj.extra_templates.iter().any(|x| x == n)
+        };
         for row in all_names.chunks(3) {
             ui.horizontal(|ui| {
                 for name in row {
-                    let active = if *name == "自定义" { !is_preset } else { self.wizard_proj.template == *name };
+                    let active = if *name == "自定义" {
+                        !names.contains(&self.wizard_proj.template.as_str()) && !self.wizard_proj.template.is_empty()
+                    } else {
+                        is_selected(&self.wizard_proj, name)
+                    };
                     let (rect, resp) = ui.allocate_exact_size(Vec2::new(170.0, 56.0), egui::Sense::click());
                     if ui.is_rect_visible(rect) {
                         let bg = if active { th.secondary_container() }
@@ -1627,14 +1717,46 @@ impl NovelApp {
                     if resp.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
                     if resp.clicked() {
                         if *name == "自定义" {
-                            if is_preset { self.wizard_proj.template.clear(); }
+                            // 切换到自定义：清掉所有预设主模板与额外预设，让用户输入自定义名
+                            if names.contains(&self.wizard_proj.template.as_str()) {
+                                self.wizard_proj.template.clear();
+                            }
+                            self.wizard_proj.extra_templates.retain(|n| !names.contains(&n.as_str()));
                         } else {
-                            self.wizard_proj.template = name.to_string();
+                            let n = name.to_string();
+                            if is_selected(&self.wizard_proj, name) {
+                                // 取消选择
+                                if self.wizard_proj.template == n {
+                                    // 主模板被取消：把第一个 extra 提升为主
+                                    if self.wizard_proj.extra_templates.is_empty() {
+                                        self.wizard_proj.template.clear();
+                                    } else {
+                                        self.wizard_proj.template = self.wizard_proj.extra_templates.remove(0);
+                                    }
+                                } else {
+                                    self.wizard_proj.extra_templates.retain(|x| x != &n);
+                                }
+                            } else {
+                                // 新增
+                                if self.wizard_proj.template.is_empty() {
+                                    self.wizard_proj.template = n;
+                                } else {
+                                    self.wizard_proj.extra_templates.push(n);
+                                }
+                            }
                         }
                     }
                 }
             });
             ui.add_space(6.0);
+        }
+        // 已选数量提示
+        {
+            let mut total = 0usize;
+            if !self.wizard_proj.template.is_empty() { total += 1; }
+            total += self.wizard_proj.extra_templates.len();
+            ui.add_space(4.0);
+            ui.label(RichText::new(format!("已选 {} 个", total)).size(11.5).color(th.on_surface_variant()));
         }
         if !is_preset {
             ui.add_space(12.0);
@@ -1815,11 +1937,18 @@ impl NovelApp {
         let mut close = false;
         let mut save = false;
         if let Some(realm) = self.wizard_realm_dialog.as_mut() {
-            let title = if realm.name.is_empty() { "新境界" } else { "编辑境界" };
-            egui::Window::new(title).resizable(false).collapsible(false)
+            let header_text = if realm.name.is_empty() { "新境界" } else { "编辑境界" };
+            // 用固定 id 防止标题变化导致 Window 重建丢焦点
+            egui::Window::new("realm_dialog")
+                .id(egui::Id::new("realm_dialog_fixed"))
+                .title_bar(false)
+                .resizable(false).collapsible(false)
                 .anchor(egui::Align2::CENTER_CENTER, Vec2::new(0.0, 0.0)).default_width(420.0)
-                .frame(egui::Frame::window(&ctx.style()).fill(win_fill).stroke(Stroke::new(1.0,th.outline_variant())).rounding(R28))
+                .frame(egui::Frame::window(&ctx.style()).fill(win_fill).stroke(Stroke::new(1.0,th.outline_variant())).rounding(R28).inner_margin(Margin::same(20.0)))
                 .show(ctx, |ui| {
+                    ui.label(RichText::new(header_text).size(16.0).color(th.on_surface()).strong());
+                    ui.add_space(12.0);
+
                     ui.label(RichText::new("第几个境界（数字越大越强）").size(11.5).color(th.on_surface_variant()));
                     ui.add_space(4.0);
                     ui.add(egui::DragValue::new(&mut realm.order).range(1..=999));
@@ -1828,19 +1957,22 @@ impl NovelApp {
                     ui.label(RichText::new("名字").size(11.5).color(th.on_surface_variant()));
                     ui.add_space(4.0);
                     ui.add(egui::TextEdit::singleline(&mut realm.name)
+                        .id(egui::Id::new("realm_name_edit"))
                         .desired_width(f32::INFINITY).hint_text("如：练气期"));
                     ui.add_space(10.0);
 
                     ui.label(RichText::new("描述").size(11.5).color(th.on_surface_variant()));
                     ui.add_space(4.0);
                     ui.add(egui::TextEdit::multiline(&mut realm.description)
+                        .id(egui::Id::new("realm_desc_edit"))
                         .desired_rows(3).desired_width(f32::INFINITY).hint_text("此境界的特点…"));
                     ui.add_space(10.0);
 
                     ui.label(RichText::new("小境界划分").size(11.5).color(th.on_surface_variant()));
                     ui.add_space(4.0);
                     ui.add(egui::TextEdit::singleline(&mut realm.sub_levels)
-                        .desired_width(f32::INFINITY).hint_text("用 / 或 → 分隔，如 初期 / 中期 / 大圆满"));
+                        .id(egui::Id::new("realm_sub_edit"))
+                        .desired_width(f32::INFINITY).hint_text("用 / 或 ／ 或 → 分隔，如 初期 / 中期 / 大圆满"));
                     ui.add_space(14.0);
 
                     ui.horizontal(|ui| {
@@ -1891,6 +2023,75 @@ fn decode_image(bytes: &[u8]) -> Result<egui::ColorImage, String> {
     let [w,h] = [rgba.width() as usize, rgba.height() as usize];
     let pixels: Vec<Color32> = rgba.pixels().map(|p| Color32::from_rgba_unmultiplied(p[0],p[1],p[2],p[3])).collect();
     Ok(egui::ColorImage { size:[w,h], pixels })
+}
+
+/// 解码 GIF，返回所有帧 + 每帧延迟（毫秒）
+fn decode_gif(bytes: &[u8]) -> Result<(Vec<egui::ColorImage>, Vec<u32>), String> {
+    use image::AnimationDecoder;
+    let cursor = std::io::Cursor::new(bytes);
+    let decoder = image::codecs::gif::GifDecoder::new(cursor).map_err(|e| e.to_string())?;
+    let mut images = Vec::new();
+    let mut delays = Vec::new();
+    for f in decoder.into_frames() {
+        let frame = f.map_err(|e| e.to_string())?;
+        let (num, den) = frame.delay().numer_denom_ms();
+        let ms = if den == 0 { 100 } else { num / den.max(1) };
+        let buf = frame.buffer();
+        let [w, h] = [buf.width() as usize, buf.height() as usize];
+        let pixels: Vec<Color32> = buf.pixels().map(|p| Color32::from_rgba_unmultiplied(p[0],p[1],p[2],p[3])).collect();
+        images.push(egui::ColorImage { size:[w,h], pixels });
+        delays.push(ms.max(20));
+    }
+    if images.is_empty() { return Err("GIF 无可用帧".into()); }
+    Ok((images, delays))
+}
+
+/// 生成首帧的高斯模糊版本，用于毛玻璃背板。
+fn decode_blurred(bytes: &[u8]) -> Result<egui::ColorImage, String> {
+    let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+    // 缩小再模糊，远快于直接对大图模糊
+    let small = img.resize_exact(
+        img.width().min(320).max(64),
+        ((img.height() as f32 / img.width() as f32) * img.width().min(320).max(64) as f32) as u32,
+        image::imageops::FilterType::Triangle,
+    );
+    let blurred = image::imageops::blur(&small.to_rgba8(), 18.0);
+    let [w, h] = [blurred.width() as usize, blurred.height() as usize];
+    let pixels: Vec<Color32> = blurred.pixels().map(|p| Color32::from_rgba_unmultiplied(p[0],p[1],p[2],p[3])).collect();
+    Ok(egui::ColorImage { size:[w,h], pixels })
+}
+
+/// 在指定 `rect` 区域绘制毛玻璃背板（截取屏幕级模糊图的对应 UV 区域并加深色叠加层与高光描边）。
+fn paint_frosted_at(ui: &egui::Ui, slot: egui::layers::ShapeIdx, rect: Rect, rounding: Rounding, blurred: &egui::TextureHandle, th: Th) {
+    let screen = ui.ctx().screen_rect();
+    let sw = screen.width().max(1.0);
+    let sh = screen.height().max(1.0);
+    let uv = Rect::from_min_max(
+        pos2((rect.min.x - screen.min.x) / sw, (rect.min.y - screen.min.y) / sh),
+        pos2((rect.max.x - screen.min.x) / sw, (rect.max.y - screen.min.y) / sh),
+    );
+    let tint = if th.dark { ca(8,10,20,150) } else { ca(255,255,255,160) };
+    ui.painter().set(slot, Shape::Vec(vec![
+        Shape::image(blurred.id(), rect, uv, Color32::WHITE),
+        Shape::rect_filled(rect, rounding, tint),
+        Shape::rect_stroke(rect, rounding, Stroke::new(1.0, ca(255,255,255,60))),
+    ]));
+}
+
+/// `card()` 的变体：若提供了模糊纹理则绘制毛玻璃背板，否则退回普通卡片。
+fn card_or_frosted<R>(
+    ui: &mut egui::Ui, th: Th, r: Rounding, pad: Margin,
+    blurred: Option<&egui::TextureHandle>,
+    f: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    if let Some(blur) = blurred {
+        let slot = ui.painter().add(Shape::Noop);
+        let inner = egui::Frame::none().fill(Color32::TRANSPARENT).rounding(r).inner_margin(pad).show(ui, f);
+        paint_frosted_at(ui, slot, inner.response.rect, r, blur, th);
+        inner
+    } else {
+        card(ui, th, r, pad, f)
+    }
 }
 fn fmt_num(n: usize) -> String { if n>=10_000 { format!("{:.1}万",n as f32/10_000.0) } else { n.to_string() } }
 fn truncate_chars(s: &str, max: usize) -> String {

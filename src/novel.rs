@@ -63,6 +63,8 @@ pub struct NovelProject {
     pub title: String,
     pub author: String,
     pub template: String,
+    /// 额外选中的模板（多选时，主模板在 template 字段，其余在此）
+    pub extra_templates: Vec<String>,
     pub outline: String,
     pub optimized_outline: String,
     pub chapters: Vec<Chapter>,
@@ -87,6 +89,7 @@ impl Default for NovelProject {
             title: String::from("我的小说"),
             author: String::new(),
             template: String::from("修仙问道"),
+            extra_templates: Vec::new(),
             outline: String::new(),
             optimized_outline: String::new(),
             chapters: Vec::new(),

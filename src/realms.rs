@@ -1,5 +1,14 @@
 use crate::novel::CustomRealm;
 
+/// 把用户填写的 sub_levels 规范化：接受 `/`、`／`、`→` 任一作为分隔符，统一展示为 `→`。
+pub fn normalize_sub_levels(s: &str) -> String {
+    s.split(|c: char| c == '/' || c == '／' || c == '→')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("→")
+}
+
 pub fn build_custom_realms_prompt(realms: &[CustomRealm]) -> String {
     if realms.is_empty() { return String::new(); }
     let mut list: Vec<&CustomRealm> = realms.iter().collect();
@@ -9,7 +18,7 @@ pub fn build_custom_realms_prompt(realms: &[CustomRealm]) -> String {
         let desc = if r.description.is_empty() { String::new() } else { format!("（{}）", r.description) };
         out.push_str(&format!("{}. {}{}\n", i + 1, r.name, desc));
         if !r.sub_levels.is_empty() {
-            out.push_str(&format!("   小境界：{}\n", r.sub_levels));
+            out.push_str(&format!("   小境界：{}\n", normalize_sub_levels(&r.sub_levels)));
         }
     }
     out

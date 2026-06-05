@@ -101,9 +101,3 @@ cargo build --release --target x86_64-pc-windows-gnu
 | UI 框架 | [egui](https://github.com/emilk/egui) / [eframe](https://github.com/emilk/egui/tree/master/crates/eframe) 0.29 |
 | 设计规范 | Material Design 3 |
 | AI 接口 | OpenAI 兼容 REST API |
-
----
-
-## License
-
-MIT © [Ethan](https://github.com/Ethan13322836698)
